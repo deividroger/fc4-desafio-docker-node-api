@@ -1,252 +1,242 @@
-Projeto: Full Cycle 4.0 — Docker e Containers
-Fase do projeto: Do Dev à Produção: Containerizando uma API Node.js
+# Feature Flags API — containerização
 
-# Do Dev à Produção: Containerizando uma API Node.js
+## Sobre a entrega
 
-## Descrição
+Esta entrega acrescenta uma camada completa de containers para a API Node.js + TypeScript existente, sem modificar seu código ou dependências. Um único `Dockerfile` oferece os estágios `dev`, `build` e `production`; Compose fornece serviços separados para o ciclo de desenvolvimento e para execução da imagem publicada.
 
-Neste desafio você vai pegar uma aplicação Node.js + TypeScript funcional, porém sem nenhuma infraestrutura de containers, e entregar a containerização completa dela em dois ambientes: desenvolvimento e produção.
+No desenvolvimento, Compose aguarda o PostgreSQL, executa as migrações na inicialização e oferece sincronização de `src/` e rebuild quando os manifestos npm mudam. Em produção, a imagem contém somente dependências de runtime e código compilado; o entrypoint aplica as migrações antes de iniciar o servidor.
 
-Cenário: você entrou em um time que mantém uma API de feature flags em produção, mas todo o fluxo de trabalho roda direto na máquina de cada desenvolvedor. Sua missão é construir do zero toda a camada de containers: um ambiente de desenvolvimento produtivo, com reload automático e ferramentas de apoio, e uma imagem de produção enxuta, segura e publicada no Docker Hub com metadados de supply chain, pronta para rodar via Docker Compose de produção.
+## Imagem no Docker Hub
 
-Os dois ambientes têm objetivos diferentes e isso deve se refletir nas suas decisões. O ambiente de desenvolvimento prioriza produtividade: feedback rápido, dependências completas, dados descartáveis. O ambiente de produção prioriza o mínimo: imagem pequena, superfície de ataque reduzida, rastreabilidade do que foi construído.
+- Repositório: [deividroger/fc4-desafio-docker-node-api](https://hub.docker.com/r/deividroger/fc4-desafio-docker-node-api)
+- Tags publicadas: `1.0.0` e `latest`
+- Pull: `docker pull deividroger/fc4-desafio-docker-node-api:1.0.0`
+- Digest do manifest index: `sha256:dc434d98a91801784e36fbed5cb59da5c529873e9e375d679aaf5cb73e32993b` (tags semver e `latest`).
+- Plataformas verificadas: `linux/amd64` e `linux/arm64`; o index inclui attestations de SBOM e provenance.
+- Comparação local em 11/11/2026, medida com `docker image ls` após builds sem `--network=none`: `dev` (`fc4-desafio-docker-node-api:validation-dev-20261111`, ID `38ce559cdaa2`) **298 MB**; `production` (`fc4-desafio-docker-node-api:validation-production-20261111`, ID `6963f9128db9`) **246 MB**. A imagem dev ficou **52 MB maior**; production está abaixo do limite de 350 MB. Essas tags são locais de validação, não publicadas.
 
-A entrega é puramente de containerização: o código da aplicação não deve ser alterado. Ele serve de contexto e referência.
+O digest é o index multiarch; os manifestos de plataforma e attestations podem ser inspecionados com o comando abaixo.
 
-## Objetivo
+## Decisões técnicas
 
-Entregar, em um repositório público no GitHub (fork do repositório base), o seguinte pacote:
+- **Base:** `node:22.23.4-alpine3.23` tem tags explícitas de Node e Alpine e uma base enxuta adequada à aplicação. `node:22.23.4-bookworm-slim` foi considerada como alternativa: oferece ecossistema baseado em glibc e pode facilitar compatibilidade de binários nativos, mas traz mais componentes e tende a aumentar a imagem. Alpine usa musl, então dependências nativas devem ser verificadas; as dependências atuais são instaladas para a plataforma-alvo. O estágio base atualiza pacotes Alpine (`apk upgrade`) para incluir correções de segurança disponíveis.
+- **Cache:** `package.json` e `package-lock.json` são copiados antes do código e `npm ci` usa cache BuildKit em `/root/.npm`. Mudanças só no código reutilizam a camada de dependências. O estágio `build` compila TypeScript; `production-deps` instala apenas dependências de runtime.
+- **Correções observadas pelo Scout:** o scan inicial encontrou `proxy-addr` abaixo da versão corrigida `2.0.8`; como os manifestos da aplicação são protegidos, `production-deps` instala explicitamente essa versão compatível com a faixa declarada, sem alterar os arquivos do repositório. O npm é removido da imagem final porque não é necessário em runtime.
+- **Sinais e encerramento:** o entrypoint de produção usa `exec` para que o Node receba SIGTERM diretamente. A verificação de saúde usa o `fetch` nativo do Node, sem adicionar `curl` ou `wget`.
+- **Supply chain:** o comando de publicação abaixo pede manifest multi-plataforma, SBOM e provenance. Esses metadados só podem ser confirmados no registry depois de uma publicação bem-sucedida.
 
-- `Dockerfile` único multi-stage com os estágios `dev`, `build` e `production`
-- `.dockerignore`
-- `compose.yaml` do ambiente de desenvolvimento, com watch, healthchecks e profiles
-- `compose.prod.yaml` do ambiente de produção, consumindo a imagem publicada no Docker Hub
-- Imagem de produção publicada em repositório público no Docker Hub: multi-arch (amd64 e arm64), com SBOM e provenance, nas tags semver e `latest`
-- Relatório de vulnerabilidades do Docker Scout em `reports/`
-- `README.md` com instruções, evidências e comandos de validação
+## Como rodar (desenvolvimento)
 
-## Contexto
+Requer Docker Engine/Desktop recente, Compose v2 e Buildx.
 
-### A aplicação existente
+Execute o bloco como script `sh`: em caso de falha ele encerra o shell com status não zero. Ajuste a porta se `PORT` no `.env` não for 3000.
 
-O repositório base contém uma API REST de feature flags em Node.js + TypeScript com persistência em PostgreSQL. Ela expõe um CRUD de flags em `/flags`, identificadas por uma chave única. Características relevantes para o desafio:
-
-- Porta configurável via variável de ambiente `PORT` (padrão 3000)
-- Conexão com o banco configurável via variáveis de ambiente (host, porta, usuário, senha e nome do database)
-- Endpoint `GET /health` que responde 200 quando a aplicação e a conexão com o banco estão saudáveis
-- Scripts npm: `dev` (execução com reload automático), `build` (compila o TypeScript para `dist/`), `start` (executa o código compilado) e `db:migrate` (aplica as migrações de banco; idempotente)
-- Tratamento de SIGTERM/SIGINT com encerramento gracioso
-
-A aplicação não possui Dockerfile, compose, dockerignore ou qualquer arquivo de containerização. Esse vácuo é proposital: é exatamente o que você vai construir.
-
-As migrações não rodam sozinhas. A subida de cada ambiente, tanto de desenvolvimento quanto de produção, deve executá-las automaticamente, e a estratégia (script de inicialização, `command` no compose ou outro mecanismo) é decisão sua. O runner de migrações é compilado junto com a aplicação: após o build, ele está disponível em `dist/db/migrate.js`.
-
-## Tecnologias obrigatórias
-
-- Docker Engine ou Docker Desktop em versão recente, com Compose v2 e Buildx
-- Buildx com builder capaz de build multi-plataforma (driver `docker-container` ou equivalente)
-- Em Docker Engine no Linux, emulação QEMU/binfmt instalada para o build arm64 (ex: `docker run --privileged --rm tonistiigi/binfmt --install arm64`); o Docker Desktop já traz a emulação embutida
-- Docker Scout (CLI ou via Docker Desktop)
-- Conta no Docker Hub com repositório público
-
-É proibido alterar o código da aplicação (`src/`, `package.json`, `package-lock.json`, `tsconfig.json` e migrações). Arquivos novos de containerização, como scripts de inicialização, são permitidos.
-
-## Requisitos
-
-### 1. Dockerfile multi-stage
-
-Um único arquivo `Dockerfile` na raiz do projeto, com no mínimo os estágios nomeados `dev`, `build` e `production`.
-
-Regras que valem para o arquivo inteiro:
-
-- Nenhuma imagem base com tag `latest` ou sem tag: versões sempre fixadas
-- Instalações de dependências usando cache de build (`RUN --mount=type=cache` apontando para o diretório de cache do npm)
-- Ordem das instruções pensada para aproveitamento de cache entre builds (metadados de dependências copiados antes do restante do código)
-
-Estágio `dev`:
-
-- Instala todas as dependências, incluindo devDependencies
-- Usuário não-root e `WORKDIR` definidos
-- `CMD` executa a aplicação em modo desenvolvimento (script `dev`)
-
-Estágio `build`:
-
-- Compila o TypeScript (`npm run build`), gerando `dist/`
-
-Estágio `production`:
-
-- Parte de uma imagem base enxuta (a escolha é sua e deve ser justificada no README)
-- Contém apenas o código compilado e as dependências de produção
-- Usuário não-root
-- `HEALTHCHECK` declarado na própria imagem, validando o `GET /health`
-- `ENTRYPOINT`/`CMD` em exec form, garantindo que o processo Node receba sinais do sistema corretamente
-- Labels OCI: `org.opencontainers.image.title`, `org.opencontainers.image.description`, `org.opencontainers.image.version` e `org.opencontainers.image.source`
-
-### 2. Ambiente de desenvolvimento (compose.yaml)
-
-- Serviços `app` (build do estágio `dev`) e `db` (PostgreSQL com versão fixada), conectados por uma network nomeada declarada no arquivo
-- `db` com healthcheck e `app` dependendo dele com `condition: service_healthy`
-- Variáveis de ambiente carregadas de um arquivo `.env` (via `env_file` ou interpolação). O `.env.example` deve estar versionado com valores funcionais para a subida via compose, e o `.env` deve estar no `.gitignore`
-- Dados do PostgreSQL em volume nomeado
-- `develop.watch` configurado com, no mínimo: ação `sync` para mudanças em `src/` e ação `rebuild` para mudanças no `package.json`
-- Serviço `adminer` disponível em `http://localhost:8081`, ativado somente pelo profile `tools`
-- Migrações aplicadas automaticamente na subida do ambiente
-- Fluxo do avaliador: `cp .env.example .env` seguido de `docker compose up` deve deixar a API respondendo em `http://localhost:3000`, com `GET /flags` retornando 200, sem nenhum passo manual adicional
-
-### 3. Imagem de produção no Docker Hub
-
-- Build com `docker buildx build` a partir do estágio `production`
-- Manifest list contendo as plataformas `linux/amd64` e `linux/arm64`
-- Build com `--sbom=true` e `--provenance=true`, com as attestations publicadas junto da imagem
-- Publicada em repositório público no Docker Hub com uma tag semver (ex: `1.0.0`) e a tag `latest`, ambas apontando para o mesmo digest
-- Tamanho da imagem, reportado por `docker image ls` após `docker pull --platform linux/amd64`, menor ou igual a 350 MB
-
-### 4. Análise de vulnerabilidades (Docker Scout)
-
-- Executar `docker scout cves` contra a imagem publicada e salvar a saída completa em `reports/scout-cves.txt`
-- A imagem não pode conter nenhuma CVE de severidade CRITICAL com correção disponível (verificável com `docker scout cves --only-severity critical --only-fixed`)
-- CVEs de severidade HIGH, e CRITICAL sem correção disponível, se existirem, devem ser listadas no README com justificativa ou plano de mitigação
-
-### 5. Ambiente de produção (compose.prod.yaml)
-
-- Serviço `app` sem instrução `build`: usa a imagem publicada no Docker Hub, referenciada pela tag semver
-- Serviços `app` e `db` com restart policy (`always` ou `unless-stopped`) e limites explícitos de CPU e memória (serviços de execução única, como um eventual serviço de migração, ficam fora desta regra)
-- Nenhum bind mount de código-fonte; dados do PostgreSQL em volume nomeado
-- Mesmo esquema de variáveis de ambiente (`.env.example` → `.env`). Em produção real esses valores viriam de um gerenciador de segredos; aqui o `.env` existe para permitir a subida local pelo avaliador
-- Migrações aplicadas automaticamente na subida do ambiente
-- Healthchecks ativos: `docker compose -f compose.prod.yaml ps` deve exibir `app` e `db` como `healthy`
-- Fluxo do avaliador: `cp .env.example .env` seguido de `docker compose -f compose.prod.yaml up -d` deve deixar a API respondendo em `http://localhost:3000`, com `GET /flags` retornando 200
-
-### 6. README
-
-Substitua o conteúdo do `README.md` do repositório base pela documentação da sua entrega, com as seguintes seções:
-
-- Sobre a entrega: visão geral da solução em 1 a 2 parágrafos
-- Imagem no Docker Hub: link do repositório, comando `docker pull`, digest do manifest e comparação de tamanho entre a imagem `dev` e a imagem `production`
-- Decisões técnicas: justificativa da imagem base de produção com comparação a pelo menos 1 alternativa considerada, e explicação da estratégia de cache de build adotada
-- Como rodar (desenvolvimento): passo a passo, incluindo o uso do watch e do profile `tools`
-- Como rodar (produção): passo a passo
-- Segurança e supply chain: comandos para verificar usuário não-root, labels, SBOM e provenance; resumo do relatório do Scout e justificativa das CVEs remanescentes (HIGH, e CRITICAL sem correção disponível), se houver
-- Validação: mapeamento de cada critério de aceite ao comando que o avaliador executa para verificá-lo
-
-## Critérios de Aceite
-
-A entrega é avaliada contra os critérios abaixo. Todos são obrigatórios.
-
-Dockerfile e contexto de build
-
-☐ `Dockerfile` único na raiz com os estágios nomeados `dev`, `build` e `production`
-☐ Nenhuma imagem em `Dockerfile`, `compose.yaml` ou `compose.prod.yaml` usa tag `latest` ou omite a tag
-☐ `.dockerignore` presente, excluindo no mínimo `node_modules`, `dist`, `.git` e `.env`
-☐ Instalações de dependências usam `RUN --mount=type=cache`
-☐ `docker build --target dev .` e `docker build --target production .` concluem sem erro
-
-Ambiente de desenvolvimento
-
-☐ `cp .env.example .env && docker compose up` deixa a API respondendo em `http://localhost:3000` e `GET /flags` retorna 200 (migrações aplicadas), sem passos manuais adicionais
-☐ `db` possui healthcheck e `app` depende dele com `condition: service_healthy`
-☐ Com `docker compose watch` (ou `up --watch`), alteração em arquivo de `src/` é refletida sem rebuild e alteração no `package.json` dispara rebuild
-☐ `docker compose --profile tools up -d` sobe o cliente de banco em `http://localhost:8081`
-☐ `docker compose exec app id -u` retorna um UID diferente de 0
-☐ `.env` não está versionado e `.env.example` está, com valores funcionais
-
-Imagem de produção e Docker Hub
-
-☐ `docker buildx imagetools inspect` da imagem lista `linux/amd64` e `linux/arm64`
-☐ `docker buildx imagetools inspect` exibe as attestations de SBOM e provenance
-☐ A tag semver e a tag `latest` apontam para o mesmo digest
-☐ Após `docker pull --platform linux/amd64`, `docker image ls` reporta tamanho menor ou igual a 350 MB
-☐ `docker image inspect` mostra `User` não-root, `HEALTHCHECK` configurado e as 4 labels OCI exigidas
-☐ Com um banco acessível (ex: no ambiente de produção), o container fica `healthy` pelo `HEALTHCHECK` da própria imagem
-☐ `docker stop` encerra o container em menos de 10 segundos, sem esperar o timeout do SIGKILL
-
-Docker Scout
-
-☐ `reports/scout-cves.txt` contém a saída completa do `docker scout cves` da imagem publicada
-☐ Zero CVEs de severidade CRITICAL com correção disponível (`docker scout cves --only-severity critical --only-fixed`)
-☐ CVEs HIGH, e CRITICAL sem correção disponível, se existirem, estão listadas e justificadas no README
-
-Ambiente de produção
-
-☐ `compose.prod.yaml` não contém instrução `build` e referencia a imagem do Docker Hub pela tag semver
-☐ Os serviços `app` e `db` têm restart policy e limites de CPU e memória
-☐ Não há bind mount de código-fonte e os dados do PostgreSQL estão em volume nomeado
-☐ `cp .env.example .env && docker compose -f compose.prod.yaml up -d` deixa a API em `http://localhost:3000`, `GET /flags` retorna 200 e `ps` exibe `app` e `db` como `healthy`
-
-README
-
-☐ Contém todas as seções obrigatórias listadas no requisito 6
-☐ Inclui o link do repositório no Docker Hub e o comando `docker pull`
-☐ Justifica a escolha da imagem base de produção comparando com pelo menos 1 alternativa
-☐ A seção Validação mapeia os critérios de aceite aos comandos de verificação
-
-Consistência geral
-
-☐ O código da aplicação (`src/`, `package.json`, `package-lock.json`, `tsconfig.json`, migrações) não foi alterado
-☐ Nenhuma credencial hardcoded em `Dockerfile` ou nos arquivos compose (valores sempre vindos do `.env`); o único arquivo versionado com valores de credenciais é o `.env.example`, contendo exclusivamente credenciais de desenvolvimento local
-
-## Estrutura obrigatória do entregável
-
-```
-.
-├── Dockerfile
-├── .dockerignore
-├── compose.yaml
-├── compose.prod.yaml
-├── .env.example
-├── reports/
-│   └── scout-cves.txt
-├── src/                  (não alterar)
-├── package.json          (não alterar)
-├── package-lock.json     (não alterar)
-├── tsconfig.json         (não alterar)
-├── ...                   (demais arquivos da aplicação, não alterar)
-└── README.md             (substituído pelo aluno)
+```sh
+cp .env.example .env || exit 1
+docker compose up --build --wait || exit 1
+http_200() {
+  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$1") || return 1
+  [ "$status" = 200 ]
+}
+ready=0
+for attempt in $(seq 1 30); do
+  if http_200 http://localhost:3000/health; then ready=1; break; fi
+  [ "$attempt" -eq 30 ] || sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+  echo "Erro: readiness expirou após 30 tentativas" >&2
+  exit 1
+fi
+http_200 http://localhost:3000/health || { echo "Erro: /health não retornou HTTP 200" >&2; exit 1; }
+http_200 http://localhost:3000/flags || { echo "Erro: /flags não retornou HTTP 200" >&2; exit 1; }
 ```
 
-Arquivos adicionais de containerização criados por você, como scripts de inicialização, podem ficar na raiz ou em uma pasta `docker/`.
+O serviço `app` espera o healthcheck do PostgreSQL, aplica as migrações e inicia `npm run dev`. Para sincronizar alterações de `src/` sem rebuild e reconstruir após alterações nos manifestos:
 
-## Entregável
+```sh
+docker compose up --watch
+```
 
-- Repositório público no GitHub, fork do repositório base, com todo o conteúdo na branch `main`
-- Repositório público no Docker Hub com a imagem de produção, com o link e o comando `docker pull` no README
+Em cópia temporária, `up --watch` sincronizou `src/` e reconstruiu o app após alteração em `package.json`; o banco permaneceu saudável e a API voltou a responder. A falha anterior com `watch --no-up` e override não foi reproduzida nesse fluxo, mas sua causa não foi isolada. A alteração de `package-lock.json` ainda não foi testada; veja a tabela de validação.
 
-## Repositório base
+A rede de desenvolvimento é nomeada pelo Compose com o prefixo do projeto, para evitar compartilhamento acidental de DNS e banco entre projetos. Instalações anteriores que usavam a rede de nome fixo `flags-network` podem precisar recriar seus containers ao adotar essa configuração; os dados continuam no volume nomeado do projeto.
 
-https://github.com/devfullcycle/fc4-desafio-docker-node-api
+Para disponibilizar o Adminer em <http://localhost:8081>:
 
-## Ordem de execução sugerida
+```sh
+docker compose --profile tools up --build --wait
+```
 
-**1.** Fork e exploração: leia os scripts do `package.json`, entenda as variáveis de ambiente esperadas e o funcionamento do `db:migrate`.
+Conecte-se no Adminer com servidor `db` e as credenciais locais do `.env`. O UID do processo da API pode ser conferido com `docker compose exec app id -u` (a imagem usa o usuário não-root `node`).
 
-**2.** Crie o `.dockerignore` e o estágio `dev` do Dockerfile.
+## Como rodar (produção)
 
-**3.** Monte o `compose.yaml` mínimo (app + db com healthcheck e migrações automáticas) até a API responder em `http://localhost:3000`.
+O `.env.example` contém somente credenciais de desenvolvimento local, úteis também para a avaliação local do Compose de produção. Em produção real, use um gerenciador de secrets e credenciais próprias.
 
-**4.** Adicione o `develop.watch` e o serviço de administração de banco sob o profile `tools`.
+Execute também este bloco como script `sh`; ele falha se o Compose ou qualquer endpoint falhar, inclusive para códigos HTTP diferentes de 200.
 
-**5.** Escreva os estágios `build` e `production` e valide localmente com `docker build --target production .`.
+```sh
+cp .env.example .env || exit 1
+docker compose -f compose.prod.yaml up -d --wait || exit 1
+http_200() {
+  status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$1") || return 1
+  [ "$status" = 200 ]
+}
+http_200 http://localhost:3000/health || { echo "Erro: /health não retornou HTTP 200" >&2; exit 1; }
+http_200 http://localhost:3000/flags || { echo "Erro: /flags não retornou HTTP 200" >&2; exit 1; }
+docker compose -f compose.prod.yaml ps || exit 1
+```
 
-**6.** Crie o builder multi-plataforma no Buildx e faça o build com SBOM e provenance, publicando as duas tags no Docker Hub.
+O Compose de produção consome a tag semver, não faz build, mantém dados em volume nomeado e define restart policy e limites de recursos. As migrações são executadas pelo entrypoint da imagem.
 
-**7.** Rode o Scout contra a imagem publicada. Se houver CVE CRITICAL com correção disponível, ajuste a imagem base e republique. Salve o relatório em `reports/`.
+## Segurança e supply chain
 
-**8.** Monte o `compose.prod.yaml` consumindo a imagem publicada, incluindo a aplicação automática das migrações.
+O usuário configurado na imagem é `node`, não root. Para inspecionar usuário, healthcheck e labels OCI:
 
-**9.** Escreva o README com as evidências e a seção de validação.
+```sh
+docker image inspect deividroger/fc4-desafio-docker-node-api:1.0.0 \
+  --format 'User={{.Config.User}} Healthcheck={{json .Config.Healthcheck}} Labels={{json .Config.Labels}}'
+```
 
-**10.** Revisão final: percorra a checklist de critérios de aceite item por item antes do push final.
+Build e publicação multiarch autorizada para Docker Hub (requer login, Buildx multi-plataforma e acesso ao registry):
 
-## Dicas finais
+```sh
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --target production \
+  --build-arg VERSION=1.0.0 \
+  --tag deividroger/fc4-desafio-docker-node-api:1.0.0 \
+  --tag deividroger/fc4-desafio-docker-node-api:latest \
+  --sbom=true --provenance=true --push .
+```
 
-A ordem das instruções no Dockerfile determina o aproveitamento de cache. Copiar o `package.json` e o lockfile antes do restante do código muda drasticamente o tempo de rebuild durante o desenvolvimento.
+Confira os manifestos e compare o digest resultante à tag `latest`:
 
-O tamanho da imagem final é consequência das suas decisões (imagem base, multi-stage, apenas dependências de produção), não de um ajuste cosmético no fim. Se a imagem estourou o limite, revisite as decisões.
+```sh
+docker buildx imagetools inspect deividroger/fc4-desafio-docker-node-api:1.0.0
+docker buildx imagetools inspect deividroger/fc4-desafio-docker-node-api:latest
+```
 
-O `HEALTHCHECK` executa dentro da imagem final: bases enxutas nem sempre trazem `curl` ou `wget`, mas o próprio `node` (com o `fetch` global) resolve.
+### Inspeção de attestations (instrução)
 
-Se o Scout apontar CVEs CRITICAL com correção disponível, o caminho quase sempre é atualizar ou trocar a imagem base, não conviver com elas.
+O comando abaixo é **somente inspeção manual**: percorre os manifestos de attestation apontados pelo index e imprime o `predicateType` de cada camada in-toto (requer `jq`). Não falha necessariamente se um tipo estiver ausente ou se um comando do pipeline falhar; não prova completude, autenticidade nem assinatura das attestations. É uma instrução, não uma execução feita nesta revisão:
 
-`docker buildx imagetools inspect` é a ferramenta para conferir plataformas, digests e attestations de uma imagem publicada sem precisar puxá-la.
+```sh
+IMAGE=deividroger/fc4-desafio-docker-node-api:1.0.0
+docker buildx imagetools inspect --raw "$IMAGE" |
+  jq -r '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest' |
+  while IFS= read -r digest; do
+    docker buildx imagetools inspect --raw "${IMAGE%@*}@$digest" |
+      jq -r '.layers[].annotations["in-toto.io/predicate-type"] // empty'
+  done
+```
 
-Teste o fluxo do avaliador do zero: clone o seu próprio fork em uma pasta limpa, copie o `.env.example` e execute exatamente os comandos descritos no README. Se qualquer passo extra for necessário, o critério não está atendido.
+Examine manualmente a saída para procurar SBOM pelo predicate SPDX (por exemplo, `https://spdx.dev/Document`) e provenance pelo predicate SLSA (prefixo `https://slsa.dev/provenance/`, por exemplo, `/v1` ou `/v0.2`). A presença de um tipo não comprova a presença do outro, nem valida os conteúdos ou suas assinaturas. Para medir a imagem amd64:
+
+```sh
+docker pull --platform linux/amd64 deividroger/fc4-desafio-docker-node-api:1.0.0
+docker image ls deividroger/fc4-desafio-docker-node-api:1.0.0
+```
+
+### Docker Scout
+
+Saída stdout completa de `docker scout cves` para a imagem publicada: [`reports/scout-cves.txt`](reports/scout-cves.txt). Em 11/11/2026, Scout v1.19.0 analisou o manifesto `linux/amd64` `9e088a8df4ea` do index acima e encontrou **0 CRITICAL, 0 HIGH, 1 MEDIUM e 0 LOW**. A saída foi comparada byte a byte com o relatório existente e coincidiu exatamente (1.338 bytes; SHA-256 `9365506ff8d4c93d772d760ac6cf6a34cbb24c02bda6a9e69496079046fba922`). Mensagens de progresso e sugestões são emitidas em stderr e não fazem parte do arquivo. O filtro `--only-severity critical --only-fixed` não encontrou pacotes vulneráveis; seus totais filtrados não representam as demais severidades.
+
+Única CVE remanescente no resultado consultado: **CVE-2025-60876**, severidade MEDIUM, pacote Alpine `ssl_client`/BusyBox `1.37.0-r30`; o Scout indicou “Fixed version: not fixed”. Acompanhe atualizações da imagem Alpine/Node e reanalise ao reconstruir.
+
+Para reproduzir e substituir o relatório:
+
+```sh
+docker scout cves registry://deividroger/fc4-desafio-docker-node-api:1.0.0 > reports/scout-cves.txt
+docker scout cves --only-severity critical --only-fixed registry://deividroger/fc4-desafio-docker-node-api:1.0.0
+```
+
+## Validação
+
+Cada linha abaixo corresponde a um critério de aceite do README-base. Os comandos de runtime devem ser executados em uma cópia temporária do projeto e com um nome de projeto Compose exclusivo se não se deseja reutilizar os volumes locais. Não use `down -v` em dados que queira preservar.
+
+Os blocos de verificação revisados abaixo e nas seções de execução são instruções: não foram reexecutados nesta revisão. Evidências anteriores não são prova de execução desses novos comandos.
+
+| Critério de aceite | Comando reproduzível | Evidência / estado |
+|---|---|---|
+| Dockerfile único na raiz, com estágios `dev`, `build` e `production` | `grep -nE '^FROM .* AS (dev|build|production)$' Dockerfile` | Passou: os três estágios estão declarados no mesmo Dockerfile. |
+| Nenhuma imagem base sem tag ou com `latest` | `grep -nE '^(FROM|[[:space:]]+image:)' Dockerfile compose.yaml compose.prod.yaml` | Passou por inspeção: tags explícitas em todas as referências. |
+| `.dockerignore` exclui `node_modules`, `dist`, `.git` e `.env` | `grep -nE '^(node_modules|dist|\.git|\.env\*)$' .dockerignore` | Passou: também exclui `reports`. |
+| Instalações usam cache BuildKit do npm | `grep -n -- '--mount=type=cache,target=/root/.npm' Dockerfile` | Passou: as instalações nos estágios de dependências usam cache. |
+| Build dos estágios `dev` e `production` conclui | `docker build --target dev --tag fc4-desafio-docker-node-api:validation-dev-20261111 .`<br>`docker build --target production --build-arg VERSION=validation-20261111 --tag fc4-desafio-docker-node-api:validation-production-20261111 .` | **Passou nesta validação**, sem `--network=none`; ambas as imagens foram construídas localmente. |
+| `cp .env.example .env` e Compose dev deixam a API pronta, migrada, com `GET /flags` 200 | Bloco em “Como rodar (desenvolvimento)”, com polling e verificação de HTTP 200 em `/health` e `/flags` | Evidência anterior em cópia temporária: migração `001 - create-flags` confirmada e endpoints responderam 200. `up --wait` sozinho não espera readiness da API dev. |
+| `db` com healthcheck e `app` aguardando `service_healthy` | `docker compose config` | Passou em configuração dos dois Compose nesta validação, usando uma cópia temporária com `.env.example`. |
+| Watch sincroniza `src/` e reconstrói ao mudar `package.json` | `docker compose up --watch` | Passou em cópia temporária para mudança de `src/server.ts` e `package.json`; `package-lock.json` não faz parte deste critério e não foi exercitado. |
+| Adminer somente no profile `tools`, disponível em `localhost:8081` | `docker compose --profile tools up --build --wait`<br>`status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 http://localhost:8081) && test "$status" = 200` | Profile declarado; subida e HTTP não foram repetidos nesta validação. |
+| `docker compose exec app id -u` não retorna zero | `docker compose exec app id -u` | Evidência anterior: UID 1000 em dev e production. |
+| `.env` ignorado e `.env.example` versionado com valores funcionais | `git check-ignore .env`<br>`git ls-files --error-unmatch .env.example` | `.env` está ignorado e o exemplo contém credenciais apenas locais; **o `.env.example` está atualmente não rastreado**, então a parte “versionado” ainda depende de adicioná-lo a um commit. |
+| Registry lista `linux/amd64` e `linux/arm64` | `docker buildx imagetools inspect deividroger/fc4-desafio-docker-node-api:1.0.0` | Evidência anterior no Docker Hub: ambas as plataformas listadas. |
+| Registry exibe attestations SBOM e provenance | Inspeção manual na subseção “Inspeção de attestations”: `docker buildx imagetools inspect --raw` e `jq` | Evidência anterior no registry; a inspeção não foi executada nesta revisão e não comprova completude nem assinatura. Não foram geradas/publicadas novas attestations. |
+| Tags `1.0.0` e `latest` apontam ao mesmo digest | `docker buildx imagetools inspect deividroger/fc4-desafio-docker-node-api:1.0.0`<br>`docker buildx imagetools inspect deividroger/fc4-desafio-docker-node-api:latest` | Evidência anterior no Docker Hub: digest index igual. |
+| Pull amd64 e imagem production de até 350 MB | `docker pull --platform linux/amd64 deividroger/fc4-desafio-docker-node-api:1.0.0`<br>`docker image ls deividroger/fc4-desafio-docker-node-api:1.0.0` | Production local recém-buildada: 246 MB. O dado publicado de 246 MB também consta na evidência anterior; nenhuma imagem foi enviada nesta validação. |
+| Imagem production tem usuário não-root, healthcheck e quatro labels OCI | `docker image inspect fc4-desafio-docker-node-api:validation-production-20261111 --format 'User={{.Config.User}} Healthcheck={{json .Config.Healthcheck}} Labels={{json .Config.Labels}}'` | Evidência anterior de imagem production local: `User=node`, healthcheck e quatro labels. |
+| Com banco acessível, app production fica healthy pelo healthcheck da imagem | Bloco em “Como rodar (produção)”: `up -d --wait`, verificação HTTP 200 e `ps` | Passou anteriormente em projeto temporário com banco novo; healthchecks de app e banco ficaram healthy. |
+| `docker stop` encerra em menos de 10 segundos sem SIGKILL | Bloco “Verificação de shutdown” abaixo | Exige container inicialmente Running, tempo inferior a 10 s e exit code 0. Evidência anterior: 0,52 s dev e 0,41 s production, com exit code 0; o bloco revisado não foi executado nesta revisão. |
+| `reports/scout-cves.txt` contém saída completa de Scout para a imagem publicada | `docker scout cves registry://deividroger/fc4-desafio-docker-node-api:1.0.0` | Relatório existente comparado byte a byte à saída stdout consultada anteriormente; não foi substituído nesta validação. |
+| Zero CRITICAL com correção disponível | `docker scout cves --only-severity critical --only-fixed registry://deividroger/fc4-desafio-docker-node-api:1.0.0` | Evidência anterior: filtro sem pacotes; consulte a ressalva sobre CVE MEDIUM abaixo. |
+| CVEs HIGH e CRITICAL sem correção, se existirem, estão justificadas | `docker scout cves registry://deividroger/fc4-desafio-docker-node-api:1.0.0` | Relatório consultado anteriormente: 0 HIGH e 1 MEDIUM (`CVE-2025-60876`, sem correção indicada); detalhado na seção Docker Scout. |
+| Compose production usa tag semver, sem `build` | `docker compose -f compose.prod.yaml config` | Passou na configuração temporária nesta validação; usa `deividroger/fc4-desafio-docker-node-api:1.0.0`. |
+| `app` e `db` production têm restart policy e limites de CPU/memória | `docker compose -f compose.prod.yaml config` | Passou por inspeção: restart e limites definidos nos dois serviços. |
+| Sem bind mount de código; PostgreSQL usa volume nomeado | `docker compose -f compose.prod.yaml config` | Passou por inspeção: volume nomeado `postgres-data`, sem bind mount de código. |
+| Fluxo production deixa API migrada/saudável com `GET /flags` 200 | Bloco em “Como rodar (produção)”, com verificação de HTTP 200 em `/health` e `/flags` | Passou anteriormente em projeto temporário com banco novo; app e banco healthy e endpoints 200. |
+| README contém todas as seções obrigatórias | `grep -nE '^## (Sobre a entrega|Imagem no Docker Hub|Decisões técnicas|Como rodar|Segurança e supply chain|Validação)' README.md` | Passou: seções listadas estão presentes. |
+| README tem link Docker Hub e comando `docker pull` | `grep -nE 'hub.docker.com|docker pull' README.md` | Passou. |
+| README justifica a base de produção comparada a uma alternativa | `grep -nE 'Base:|bookworm-slim' README.md` | Passou: comparação com `node:22.23.4-bookworm-slim`. |
+| Seção Validação mapeia cada critério a verificações | Tabela desta seção; valide a presença com `grep -n 'Critério de aceite' README.md` | Passou nesta revisão: há uma linha por critério do checklist base e comandos associados. |
+| Código protegido não foi alterado | `git diff --exit-code HEAD -- src package.json package-lock.json tsconfig.json` | Confira também arquivos não rastreados em `src/`; nenhum arquivo protegido alterado na verificação desta revisão. |
+| Sem credenciais hardcoded nos Dockerfiles/Compose; exemplo contém somente credenciais locais | `grep -nE '(PASSWORD|SECRET|TOKEN)[=:]' Dockerfile compose.yaml compose.prod.yaml`<br>`grep -nE '^(PORT|DB_HOST|DB_PORT|DB_USER|DB_PASSWORD|DB_NAME)=' .env.example` | Passou por inspeção: arquivos de container referenciam variáveis; valores de desenvolvimento estão apenas em `.env.example`. |
+
+### Verificação de shutdown
+
+Em uma cópia/projeto Compose temporário com o app em execução, rode o bloco como script `sh`. Ele **para o app**; não o use em containers que não queira parar. Para produção, substitua a primeira linha por `app_id=$(docker compose -f compose.prod.yaml ps -q app) || exit 1`.
+
+```sh
+app_id=$(docker compose ps -q app) || exit 1
+[ -n "$app_id" ] || { echo "Erro: nenhum app em execução" >&2; exit 1; }
+python3 -c '
+import json, subprocess, sys, time
+c = sys.argv[1]
+def state():
+    return json.loads(subprocess.check_output(
+        ["docker", "inspect", "--format", "{{json .State}}", c], text=True))
+if not state()["Running"]:
+    sys.exit("Erro: app não estava Running antes do stop")
+start = time.monotonic()
+subprocess.run(["docker", "stop", "-t", "10", c], check=True)
+elapsed = time.monotonic() - start
+after = state()
+code = after["ExitCode"]
+running = after["Running"]
+print(f"elapsed={elapsed:.2f}s; Running={running}; exit={code}")
+if running or elapsed >= 10 or code != 0:
+    sys.exit("Erro: shutdown não foi gracioso")
+' "$app_id" || exit 1
+```
+
+O exit code 0 é mais restritivo que apenas excluir 137 (SIGKILL). O tempo inclui a execução do comando `docker stop`.
+
+## Estado da validação desta entrega
+
+Em 11/11/2026, Docker Desktop 4.58.0, Engine 29.1.5 e Compose v5.0.1: testes em cópia temporária com projetos `flagsvalidate94812dev` e `flagsvalidate94812prod`, `.env.example` e overrides fora do repositório. As portas foram alocadas dinamicamente em loopback (62327 em dev e 62326 em production no primeiro teste), sem usar a porta 3000 do host. Em dev, o override também substituiu o nome fixo da rede `flags-network` por uma rede exclusiva. Os volumes criados tinham os respectivos labels de projeto e foram removidos com seus containers e redes após o teste; recursos anteriores não foram parados nem removidos. O `npm ci` no build dev temporário registrou ainda 3 vulnerabilidades no audit (1 moderada, 1 alta e 1 crítica); não confundir esse conjunto de dependências com o resultado Scout da imagem publicada.
+
+No follow-up, na mesma versão de Docker e Compose, `docker compose -p <projeto> up --watch` foi executado sem override em cópias temporárias, com `PORT` alterado no `.env` temporário para evitar a porta 3000 ocupada. Antes da correção, o projeto `flagswatcha7a5ce2a6a` reutilizou a rede fixa preexistente e emitiu aviso; apesar disso, o rebuild de `package.json` passou sem recriar o banco. Após remover o nome global da rede em `compose.yaml`, o projeto `flagswatchdc4aa2a6fb` criou sua própria rede e passou nos testes de sync e rebuild descritos acima. Os containers, volumes, rede própria, imagens temporárias e cópias criados pelo follow-up foram removidos; a rede preexistente foi preservada. O cache compartilhado de build não foi limpo. Esses testes não reexecutaram o cenário anterior com `watch --no-up` e override nem o rebuild de `package-lock.json`.
+
+### Reteste local dos targets
+
+Em 11/11/2026, os builds que haviam ficado `BLOCKED` somente porque o validator tentara desabilitar a rede foram executados localmente **sem `--network=none`** e concluíram com sucesso. Os tags de validação foram confirmados inexistentes antes do build e são exclusivos; nenhum tag preexistente foi sobrescrito. Comandos e resultados:
+
+```sh
+docker build --target dev --tag fc4-desafio-docker-node-api:validation-dev-20261111 .
+docker build --target production --build-arg VERSION=validation-20261111 --tag fc4-desafio-docker-node-api:validation-production-20261111 .
+docker image ls fc4-desafio-docker-node-api:validation-dev-20261111
+docker image ls fc4-desafio-docker-node-api:validation-production-20261111
+```
+
+`docker image ls` reportou dev `298 MB` (ID `38ce559cdaa2`) e production `246 MB` (ID `6963f9128db9`): diferença medida de `52 MB`. Esses builds locais não alteraram tecnicamente a imagem Docker publicada, portanto ela não foi republicada. Nenhum commit ou push para o GitHub foi realizado.
+
+Nesta revisão, `.env.example` e os demais novos arquivos de containerização e documentação continuam não rastreados; não houve stage, commit ou push. Versioná-los continua sendo uma ação pendente.

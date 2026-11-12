@@ -1,0 +1,32 @@
+
+
+## Overview
+
+                   │                       Analyzed Image                       
+───────────────────┼────────────────────────────────────────────────────────────
+ Target            │  registry://deividroger/fc4-desafio-docker-node-api:1.0.0  
+   digest          │  9e088a8df4ea                                              
+   platform        │ linux/amd64                                                
+   vulnerabilities │    0C     0H     1M     0L                                 
+   size            │ 62 MB                                                      
+   packages        │ 101                                                        
+
+
+## Packages and Vulnerabilities
+
+   0C     0H     1M     0L  ssl_client 1.37.0-r30
+pkg:apk/alpine/ssl_client@1.37.0-r30?arch=x86_64&distro=alpine-3.23.8&upstream=busybox
+
+    x MEDIUM CVE-2025-60876
+      https://scout.docker.com/v/CVE-2025-60876?s=alpine&n=busybox&ns=alpine&t=apk&osn=alpine&osv=3.23&vr=%3C%3D1.37.0-r30
+      Affected range : <=1.37.0-r30 
+      Fixed version  : not fixed    
+    
+
+
+1 vulnerability found in 1 package
+  CRITICAL  0 
+  HIGH      0 
+  MEDIUM    1 
+  LOW       0 
+
